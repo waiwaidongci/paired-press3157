@@ -10,6 +10,7 @@
 ## 功能与方法
 - 试印研究、成对纸样录入/编辑/删除；重名记录与非法数值明确拒绝。
 - 配对差均值与精确符号翻转置换检验。同一纸张上成对测量；小样本枚举全部符号，较大样本使用固定种子 Monte Carlo 与加一校正。
+- **连续监测（新增）**：启动时锁定双侧 α = 0.05（门槛 M = 20），零假设下差值独立且关于零对称，以 Beta(½,½) 预测概率下注得到非负鞅；Ville 不等式保证任意查看次数、任意停时的全程误报 ≤ 5%。每次查看只纳入累计新增的完整纸样，重试与晚到执行不重复纳入；已纳入纸样修改/删除即封存，改后数据不续入旧证据。监测不阻塞纸样登记，查看经持久队列执行、中断可恢复，旧执行不能倒退证据或解除封存。
 - 每次运行冻结参数、观测和SHA256。Redis任务由独立worker计算，写DB与共享产物卷；输入修改不会改写历史结果。
 - 负责人复核不可覆盖；审计记录登录、数据改动、排队、复核与导出；240请求/分钟限流、全局可恢复错误。
 
@@ -34,8 +35,9 @@ docker compose exec -T backend python -m scripts.seed_demo
 4. 09:20 分析执行页保留默认参数 `{"resamples": 10000}`，命名本轮研究。
 5. 09:21 冻结输入并排队，worker实算，结果页自动刷新。
 6. 09:25 阅读核心数值、方法边界、明细与SHA256；发现失败先修数据重跑。
-7. 09:35 admin打开业务复核，写明限制与下一步动作，归档后不可覆盖。
-8. 09:40 viewer读取复核意见并下载CSV，在操作留痕页核对下载事件。
+7. 09:26 同一批次要边试印边看，在分析页启动连续监测（锁定 α=0.05）；新纸样照常登记，回到结果页“查看累计新增纸样”，页面显示累计证据、停止判定与纳入范围。
+8. 09:35 admin打开业务复核，写明限制与下一步动作，归档后不可覆盖。
+9. 09:40 viewer读取复核意见并下载CSV，在操作留痕页核对下载事件。
 
 ## 技术与目录
 |部分|实现|
@@ -46,15 +48,19 @@ docker compose exec -T backend python -m scripts.seed_demo
 |数据库|PostgreSQL16|
 |任务|Redis7持久队列，Python独立worker，心跳healthcheck|
 
-`frontend/src/`分api、stores、types、components/common、hooks、pages、router、utils、constants；`backend/src/`分config、models、schemas、services、controllers、routes、middlewares、utils、constants；`backend/scripts/seed_demo.py`自然键插入、重复不覆盖修改；`backend/migrations/README.md`说明schema版本。
+`frontend/src/`分api、stores、types、components/common、hooks、pages、router、utils、constants；`backend/src/`分config、models、schemas、services、controllers、routes、middlewares、utils、constants；`backend/scripts/seed_demo.py`自然键插入、重复不覆盖修改；`backend/migrations/README.md`说明schema版本；`backend/tests/`为 pytest 验证。
+
+连续监测相关文件：`backend/src/services/sequential.py`（e过程统计量）、`backend/src/services/monitor.py`（纳入、封存、并发与恢复）、`backend/src/models/monitor.py`（试用/纳入/查看三表）、`backend/src/routes/research.py` 中 `/monitor/*`、`frontend/src/components/common/monitor-summary.js` 与结果页 `#results/trial-{id}`。新表由启动时 `create_all` 建立，不执行破坏性迁移；已有数据库首次启动会自动补建这三张表。
 
 环境变量 `.env.example`：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO。开发时在本地venv安装backend/requirements.txt，设置DATABASE_URL、REDIS_URL、JWT_SECRET再运行uvicorn；前端开发经Nginx代理 `/api/` 到不带前缀的API。
 
 共享枚举：角色admin/analyst/viewer和队列queued/running/completed/failed；后端`src/constants/enums.py`、认证与worker使用相同值；前端`src/types/enums.js`、状态与角色界面使用相同值。Google Fonts：Noto Serif SC + IBM Plex Mono；断网使用serif/monospace回退。
 
 ## 算法输入、失败态与复现
-输入为选定批次全部观测和参数，输出核心数值、明细、解释；参数经后端严格白名单和范围验证。同一纸张上成对测量；小样本枚举全部符号，较大样本使用固定种子 Monte Carlo 与加一校正。。空批次拒绝；不完整字段/非有限数/非法计数拒绝；常量相关列与不足样本使任务failed并保留错误。固定seed42、输入checksum相同可复现。独立oracle：小n穷举手算；交换两列统计量变号p相同；缺失配对拒绝。
+输入为选定批次全部观测和参数，输出核心数值、明细、解释；参数经后端严格白名单和范围验证。同一纸张上成对测量；小样本枚举全部符号，较大样本使用固定种子 Monte Carlo 与加一校正。空批次拒绝；不完整字段/非有限数/非法计数拒绝；常量相关列与不足样本使任务failed并保留错误。固定seed42、输入checksum相同可复现。独立oracle：小n穷举手算；交换两列统计量变号p相同；缺失配对拒绝。
 
-已知边界：小型本地研究应用，使用合成数据，不含企业SSO与外发邮件；结果由人工复核，不自动执行业务决策；单worker恢复queued/running任务，数据库与Redis间未采用分布式事务。以当前测试目录TESTING.md记录实际验证结果。
+连续监测的独立 oracle：纳入序列的符号逐样本重放、增量求和与 Beta 闭式解三者一致；零差值记为结且不产生证据；四种零假设模拟（逐对查看/含结/随机停看/不同种子）全程误报率 ≤ 5%；偏移信号下功效显著上升。详见 `TESTING.md`。
+
+已知边界：小型本地研究应用，使用合成数据，不含企业SSO与外发邮件；结果由人工复核，不自动执行业务决策；单worker恢复queued/running任务，数据库与Redis间未采用分布式事务。连续监测假设同一纸张内配对独立、差值在零假设下关于零对称；若差值分布明显偏斜（例如受下限截断），符号法前提不成立，应在新试验前改用相应方法。以当前测试目录TESTING.md记录实际验证结果。
 
 MIT License。

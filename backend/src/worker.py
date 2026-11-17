@@ -4,7 +4,8 @@ from redis import Redis
 from sqlalchemy import select
 from src.config.database import Session
 from src.models.run import Run
-from src.models import user,study,observation,review,audit
+from src.models import user,study,observation,review,audit,monitor
+from src.services import monitor as monitors
 from src.services.algorithm import calculate
 from src.utils.serializers import checksum
 redis=Redis.from_url(os.environ['REDIS_URL'])
@@ -13,11 +14,28 @@ Path('/app/artifacts').mkdir(exist_ok=True)
 with Session() as db:
     pending=list(db.scalars(select(Run).where(Run.status.in_(['queued','running']))))
     for run in pending: redis.rpush('analysis-queue',run.id)
+    # Monitoring looks are durable in the database; requeueing never resets a
+    # seal or rewinds cumulative evidence.
+    monitors.requeue_unfinished(db,redis)
+last_sweep=time.time()
 while True:
     Path('/tmp/worker-heartbeat').touch()
-    job=redis.blpop('analysis-queue',timeout=2)
+    # Periodic sweep: if Redis lost the delivery hint, the durable queued /
+    # running looks are re-enqueued.  Already-waiting IDs are skipped.
+    if time.time()-last_sweep>=30:
+        last_sweep=time.time()
+        try:
+            with Session() as db: monitors.requeue_unfinished(db,redis)
+        except Exception: logging.exception('monitor sweep failed')
+    job=redis.blpop(['analysis-queue','monitor-queue'],timeout=2)
     if not job: continue
+    queue_name=job[0].decode() if isinstance(job[0],bytes) else str(job[0])
     id=int(job[1])
+    if queue_name=='monitor-queue':
+        with Session() as db:
+            try: monitors.execute_look(db,id)
+            except Exception: logging.exception('monitor look failed')
+        continue
     with Session() as db:
         run=db.get(Run,id)
         if not run or run.status in ('completed','failed'): continue

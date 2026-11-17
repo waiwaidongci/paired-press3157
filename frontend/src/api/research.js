@@ -1,3 +1,4 @@
 import {request,post} from './client.js';
 export const studies={list:()=>request('/studies'),create:x=>post('/studies',x),rows:id=>request(`/studies/${id}/observations`),save:(id,x,row)=>row?request(`/studies/${id}/observations/${row}`,{method:'PUT',body:JSON.stringify(x)}):post(`/studies/${id}/observations`,x),remove:(id,row)=>request(`/studies/${id}/observations/${row}`,{method:'DELETE'})};
 export const runs={list:()=>request('/runs'),create:x=>post('/runs',x),get:id=>request(`/runs/${id}`),review:(id,note)=>post(`/runs/${id}/review`,{note}),export:id=>request(`/runs/${id}/export`)};
+export const monitor={trials:studyId=>request('/monitor/trials'+(studyId?`?study_id=${studyId}`:'')),start:studyId=>post('/monitor/trials',{study_id:studyId}),get:id=>request(`/monitor/trials/${id}`),look:(id,key)=>post(`/monitor/trials/${id}/looks`,{request_key:key||null}),resume:lookId=>post(`/monitor/looks/${lookId}/resume`,{}),seal:id=>post(`/monitor/trials/${id}/seal`,{})};
